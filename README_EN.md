@@ -22,7 +22,7 @@ This way, if the patch is incompatible with the current Kiro version, the origin
 Kiro task metadata updates write to:
 
 ```text
-C:\Users\cassianvale\.kiro\tasks\9149b1d5febb49c1\codex-provider.meta.json
+C:\Users\<USERNAME>\.kiro\tasks\<TASK_ID>\codex-provider.meta.json
 ```
 
 The original write flow is:

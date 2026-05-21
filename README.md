@@ -22,7 +22,7 @@
 Kiro task metadata 更新时会写入：
 
 ```text
-C:\Users\cassianvale\.kiro\tasks\9149b1d5febb49c1\codex-provider.meta.json
+C:\Users\<USERNAME>\.kiro\tasks\<TASK_ID>\codex-provider.meta.json
 ```
 
 原实现的写入流程是：
