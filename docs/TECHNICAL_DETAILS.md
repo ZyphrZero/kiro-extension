@@ -18,6 +18,7 @@ extension.js
 - `fs_write` / `fs_append` 大块流式参数未传完即被 abort。
 - `tasks.md` 生成阶段重复全量覆盖文件，导致子任务长时间 running。
 - 模型高负载、临时限流、网络瞬断时任务直接失败。
+- 模型用 `Start-Sleep -Seconds ...; Write-Output "ok"` 做长时间 shell 空等，而不是交给扩展内部 retry 或报告重试耗尽。
 - extension host 高频记录空 `FileDecoration` 警告。
 - `[Steering] ExistingFiles` 上下文文件列表重复膨胀。
 - stale diagnostics 越界导致 code problems 整体格式化失败。
@@ -73,6 +74,7 @@ C:\Users\<USERNAME>\.kiro\tasks\<TASK_DIR>\codex-provider.meta.json
 | 写入工具描述和预检 | `fs_write text is too large`、`fs_append text is too large` | 40 行常规建议，80 行硬上限 |
 | `tasks.md` 生成提示 | `The model MUST write tasks.md incrementally` | 禁止一次性生成或反复全量覆盖 `tasks.md` |
 | 模型流重试 | `KIRO_STREAM_RETRY_MAX_ATTEMPTS`、`getRetryableStreamErrorKind` | 高负载、限流、网络瞬断在首 chunk 前有限重试 |
+| shell 空等拦截 | `KIRO_getBlockedNoopWaitReason`、`Blocked no-op shell wait command` | 拒绝长时间 `Start-Sleep` 加 `Write-Output "ok"` / `"retry"` 的空等退避 |
 | FileDecoration | `AgentActivityFileDecorationProvider`、`provideFileDecoration` | 无装饰时返回 `undefined`，有活动时返回合法 decoration |
 | Workspace file 去重 | `getWorkspaceFiles()`、`read_file`、`read_files` | 返回前按 path 去重 |
 | Diagnostics 格式化 | `Caught error formatting code problems` | 跳过 stale/out-of-range diagnostic |
@@ -385,9 +387,52 @@ KIRO_STREAM_RETRY_FOREVER = true;
 
 同时应理解它会忽略 `KIRO_STREAM_RETRY_MAX_ATTEMPTS`。
 
-## 10. FileDecoration 空对象修复
+## 10. shell 空等命令拦截
 
 ### 10.1 原始问题
+
+当模型高负载、限流或子代理失败已经冒泡到 agent 时，模型可能自己调用 `execute_pwsh` 做长时间等待，例如：
+
+```powershell
+Start-Sleep -Seconds 360; Write-Output "ok"
+```
+
+这不是扩展写死的命令，而是模型把 shell 当成 retry/backoff 计时器使用。实际效果是任务长时间停留在 running，但没有执行任何有价值的检查或修改。
+
+### 10.2 当前实现
+
+可搜索：
+
+```text
+KIRO_getBlockedNoopWaitReason
+Blocked no-op shell wait command
+Do not use Start-Sleep plus Write-Output
+```
+
+补丁在两套 shell 工具执行路径中都加入了执行前检查。匹配以下模式时会直接拒绝执行：
+
+```powershell
+Start-Sleep -Seconds <N>; Write-Output "ok"
+Start-Sleep -Seconds <N>; Write-Output "retry"
+Start-Sleep <N>; echo ok
+powershell -Command "Start-Sleep -Seconds <N>; Write-Output 'ok'"
+```
+
+当前只拦截 `N >= 60` 的 no-op wait。被拦截后，工具返回可恢复错误，提示模型不要用 shell 空等处理高负载、限流或网络错误，而是依赖扩展内部 stream retry；如果重试耗尽，就直接向用户报告。
+
+### 10.3 不会拦截的情况
+
+以下命令不会被这个 guard 拦截：
+
+- 短等待，例如 `Start-Sleep -Seconds 2`。
+- 等待后执行真实检查，例如 `Start-Sleep -Seconds 2; Get-ChildItem ...`。
+- 开发服务器、watcher 等真正的长运行命令，它们仍由已有 long-running command 规则处理。
+
+这个限制只针对“长时间等待后输出 ok/retry/done”的空等退避，避免误伤正常诊断。
+
+## 11. FileDecoration 空对象修复
+
+### 11.1 原始问题
 
 extension host 可能反复记录：
 
@@ -397,7 +442,7 @@ INVALID decoration from extension 'kiro.kiroAgent': Error: The decoration is emp
 
 原因是 `provideFileDecoration()` 在没有有效 decoration 时返回空对象，或返回缺少展示字段的对象。
 
-### 10.2 当前实现
+### 11.2 当前实现
 
 可搜索：
 
@@ -424,9 +469,9 @@ Kiro agent activity
 
 `badge`、`tooltip`、`color` 至少提供了 VS Code/Kiro `FileDecoration` 校验所需的显示字段。
 
-## 11. `getWorkspaceFiles()` 去重
+## 12. `getWorkspaceFiles()` 去重
 
-### 11.1 原始问题
+### 12.1 原始问题
 
 Kiro 上下文会从多处收集文件引用：
 
@@ -441,7 +486,7 @@ Kiro 上下文会从多处收集文件引用：
 [Steering] ExistingFiles: ...
 ```
 
-### 11.2 当前实现
+### 12.2 当前实现
 
 可搜索：
 
@@ -459,7 +504,7 @@ InvalidFilePathInReadFile
 - 不改变路径字符串本身。
 - 不尝试做大小写归一、realpath 解析或 symlink 解析。
 
-### 11.3 设计边界
+### 12.3 设计边界
 
 当前去重是保守的字符串去重。它不会把下面这些视作同一个文件：
 
@@ -471,9 +516,9 @@ c:\project\file.ts
 
 这样可以避免在 bundle 补丁中引入路径规范化副作用。
 
-## 12. stale diagnostics 跳过
+## 13. stale diagnostics 跳过
 
-### 12.1 原始问题
+### 13.1 原始问题
 
 快速编辑文件后，旧 diagnostics 可能指向已经不存在的行。原始 formatter 直接访问 `diagnostic.range.start.line` 对应的文本行，越界时可能抛出，最终整段 code problems 格式化失败：
 
@@ -481,7 +526,7 @@ c:\project\file.ts
 Caught error formatting code problems, skipping for now
 ```
 
-### 12.2 当前实现
+### 13.2 当前实现
 
 可搜索：
 
@@ -499,9 +544,9 @@ diagnostic.range.end.line
 
 不满足条件的 diagnostic 会被跳过，不再导致整个 code problems block 失败。
 
-## 13. 安装验证流程
+## 14. 安装验证流程
 
-### 13.1 替换前
+### 14.1 替换前
 
 ```powershell
 $target = "D:\Kiro\resources\app\extensions\kiro.kiro-agent\dist\extension.js"
@@ -509,7 +554,7 @@ Copy-Item -LiteralPath $target -Destination "$target.original-backup"
 node --check ".\extension.js"
 ```
 
-### 13.2 替换
+### 14.2 替换
 
 ```powershell
 Copy-Item -LiteralPath ".\extension.js" -Destination $target -Force
@@ -522,7 +567,7 @@ Copy-Item -LiteralPath ".\extension.js" -Destination $target -Force
 3. 重新执行复制。
 4. 仍失败时使用管理员 PowerShell。
 
-### 13.3 替换后
+### 14.3 替换后
 
 ```powershell
 node --check $target
@@ -534,7 +579,7 @@ Select-String -Path $target -Pattern "KIRO_STREAM_RETRY_MAX_ATTEMPTS","KIRO_STRE
 - `Developer: Reload Window`
 - 或完全重启 Kiro。
 
-### 13.4 功能观察点
+### 14.4 功能观察点
 
 启动后观察 Kiro 日志：
 
@@ -550,9 +595,9 @@ Select-String -Path $target -Pattern "KIRO_STREAM_RETRY_MAX_ATTEMPTS","KIRO_STRE
 - `Failed to invoke Spec Task Execution` 的频率下降。
 - `[Steering] ExistingFiles` 不再出现同一路径大量重复。
 
-## 14. 常见问题排障
+## 15. 常见问题排障
 
-### 14.1 仍然看到 `Too many requests`
+### 15.1 仍然看到 `Too many requests`
 
 如果达到 5 次重试后服务仍限流，最终仍会显示错误。这是预期行为。默认补丁不是无限重试。
 
@@ -574,7 +619,7 @@ KIRO_STREAM_RETRY_MAX_ATTEMPTS = 10;
 KIRO_STREAM_RETRY_FOREVER = true;
 ```
 
-### 14.2 仍然出现用量上限错误
+### 15.2 仍然出现用量上限错误
 
 例如：
 
@@ -587,7 +632,7 @@ Overage limit reached
 
 这些不是临时网络或服务抖动，不会自动重试。需要等待额度恢复或更换账号/计划。
 
-### 14.3 `Failed to invoke Spec Task Execution` 仍出现
+### 15.3 `Failed to invoke Spec Task Execution` 仍出现
 
 该错误只是父级工具包装后的结果，需继续看前面的真实错误：
 
@@ -599,7 +644,7 @@ Overage limit reached
 
 如果前置错误是高负载、限流、网络瞬断，补丁会先有限重试。如果重试耗尽仍失败，父级仍可能显示 invoke failure。
 
-### 14.4 文件写入仍被 abort
+### 15.4 文件写入仍被 abort
 
 检查模型是否仍在尝试一次性写入超大 `text`：
 
@@ -607,7 +652,31 @@ Overage limit reached
 - 是否反复对同一 `tasks.md` 使用 `fs_write`。
 - 是否应该改为多次 `str_replace`。
 
-### 14.5 Kiro 更新后补丁失效
+### 15.5 仍然看到长时间 `Start-Sleep`
+
+如果命令是下面这种 no-op wait，应该被拒绝：
+
+```powershell
+Start-Sleep -Seconds 360; Write-Output "ok"
+```
+
+检查安装目录中的 bundle 是否包含：
+
+```powershell
+Select-String -Path $target -Pattern "KIRO_getBlockedNoopWaitReason","Blocked no-op shell wait command"
+```
+
+如果没有，说明安装目录还没有替换到最新补丁，或 Kiro 更新覆盖了补丁。
+
+如果命令是短等待后做真实检查，例如：
+
+```powershell
+Start-Sleep -Seconds 2; Get-ChildItem ...
+```
+
+这是允许的，因为它不是空等退避。
+
+### 15.6 Kiro 更新后补丁失效
 
 Kiro 更新可能覆盖安装目录中的 `extension.js`。更新后需要：
 
@@ -616,7 +685,7 @@ Kiro 更新可能覆盖安装目录中的 `extension.js`。更新后需要：
 3. 重新备份新的官方 bundle。
 4. 再替换补丁 bundle。
 
-## 15. 维护原则
+## 16. 维护原则
 
 维护这个补丁时建议遵守以下原则：
 
@@ -628,7 +697,7 @@ Kiro 更新可能覆盖安装目录中的 `extension.js`。更新后需要：
 - 修改交付行为时同步更新 `README.md` 和本文档。
 - 分发时提醒用户自行备份原版 `extension.js`。
 
-## 16. 回滚流程
+## 17. 回滚流程
 
 如果补丁不适配当前 Kiro 版本：
 
@@ -640,7 +709,7 @@ node --check $target
 
 然后 reload 或重启 Kiro。
 
-## 17. 当前不会处理的问题
+## 18. 当前不会处理的问题
 
 以下问题当前只记录，不在本补丁范围内修复：
 

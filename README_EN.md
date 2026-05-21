@@ -16,6 +16,7 @@ This patch is intended for Windows Kiro users who see:
 - File write aborts: `Operation was aborted by user or system`, `Stream error`
 - Intermittent spec/task failures: `Failed to invoke Spec Task Execution`
 - Immediate failures during model high load, throttling, or transient network jitter
+- Long no-op shell waits such as `Start-Sleep -Seconds ...; Write-Output "ok"` keeping tasks occupied
 - Repeated extension-host warning: `The decoration is empty`
 - Duplicated `[Steering] ExistingFiles` entries
 - Stale diagnostics causing code-problems formatting to fail
@@ -92,6 +93,7 @@ Copy-Item "$target.original-backup" $target -Force
 | `tasks.md` generation | Avoids one-shot full-file generation; uses initial `fs_write` plus later `fs_append` calls |
 | FileDecoration | Returns `undefined` when there is no decoration, avoiding empty-decoration warnings |
 | Model stream errors | Retries high-load, throttling, and transient network errors with bounded backoff |
+| Shell no-op waits | Blocks long `Start-Sleep` plus `Write-Output "ok"` / `"retry"` no-op waits |
 | ExistingFiles | Deduplicates `getWorkspaceFiles()` results by path |
 | Code problems | Skips invalid or out-of-bounds diagnostics instead of failing the whole formatting pass |
 

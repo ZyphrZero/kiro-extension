@@ -16,6 +16,7 @@ English notes: [README_EN.md](README_EN.md)
 - 文件写入中断：`Operation was aborted by user or system`、`Stream error`
 - spec/task 偶发失败：`Failed to invoke Spec Task Execution`
 - 模型高负载、限流或网络短暂抖动导致任务直接失败
+- 模型用 `Start-Sleep -Seconds ...; Write-Output "ok"` 做长时间空等，导致任务无意义占用 running 状态
 - extension host 反复提示：`The decoration is empty`
 - `[Steering] ExistingFiles` 文件列表重复膨胀
 - stale diagnostics 导致 code problems 格式化失败
@@ -92,6 +93,7 @@ Copy-Item "$target.original-backup" $target -Force
 | `tasks.md` 生成 | 限制一次性全量写入，首段 `fs_write`，后续 `fs_append` |
 | FileDecoration | 无装饰时返回 `undefined`，避免空 decoration 警告 |
 | 模型流错误 | 对高负载、临时限流、网络抖动做有限自动重试 |
+| shell 空等 | 拦截 `Start-Sleep` 加 `Write-Output "ok"` / `"retry"` 的长时间空等命令 |
 | ExistingFiles | `getWorkspaceFiles()` 返回前按路径去重 |
 | code problems | 跳过无效或越界 diagnostics，避免整体格式化失败 |
 
