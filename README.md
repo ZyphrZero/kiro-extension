@@ -106,6 +106,14 @@ B14: aborted
 An unexpected error occurred, please retry.
 ```
 
+Spec task 子代理也可能显示：
+
+```text
+Failed to invoke Spec Task Execution
+```
+
+这通常不是 `invoke_sub_agent` 找不到子代理，而是 `spec-task-execution` 子代理内部连续遇到高负载/瞬时服务错误，重试耗尽后被父级工具包装成 invoke 失败。
+
 原行为是直接把当前执行标记为失败。高负载通常是瞬时服务容量问题，网络错误也可能只是 TLS/socket/fetch 层的短暂抖动，带有 `please retry` / `please try again` 的服务端文案也明确表示应先重试，再把失败暴露给用户。
 
 ### 6. `[Steering] ExistingFiles` 文件列表重复膨胀
@@ -255,7 +263,7 @@ The streamed write input was aborted before complete. Retry with smaller chunks.
 - 网络错误类：`B14`、`be10`。
 - 常见网络错误码或 message：`ECONNRESET`、`ECONNABORTED`、`ECONNREFUSED`、`EHOSTUNREACH`、`ENETUNREACH`、`ENOTFOUND`、`EAI_AGAIN`、`ETIMEDOUT`、`ERR_NETWORK`、`fetch failed`、`failed to fetch`、`socket disconnected`。
 - 明确要求重试的瞬时服务端 message：`please retry`、`please try again`、`An unexpected error occurred`、`temporarily unavailable`、`unexpectedly high load`。
-- 默认最多重试 5 次，可通过 `extension.js` 中的常量调整。
+- 默认最多重试 5 次，可通过 `extension.js` 中的常量调整；不默认开启无限重试，避免在服务长时间高负载时让任务无限占用执行状态。
 - 默认退避时间约为 1.5 秒、4 秒、9 秒、16 秒、25 秒，并加入少量随机抖动。
 - 如果模型已经流出任何 chunk，则不再自动重试，避免重复执行工具调用、重复写文件或重复提交部分输出。
 - 如果达到重试上限后仍失败，才保留原有错误路径，把错误展示给用户。
@@ -271,8 +279,8 @@ KIRO_STREAM_RETRY_BACKOFF_MS = [1500, 4e3, 9e3, 16e3, 25e3];
 
 含义如下：
 
-- `KIRO_STREAM_RETRY_MAX_ATTEMPTS`：最大重试次数，默认 `5`；设为 `0` 表示不自动重试。
-- `KIRO_STREAM_RETRY_FOREVER`：是否无限重试，默认 `false`；设为 `true` 后会忽略 `KIRO_STREAM_RETRY_MAX_ATTEMPTS`。
+- `KIRO_STREAM_RETRY_MAX_ATTEMPTS`：最大重试次数，默认 `5`；仅在 `KIRO_STREAM_RETRY_FOREVER = false` 时生效；设为 `0` 表示不自动重试。
+- `KIRO_STREAM_RETRY_FOREVER`：是否无限重试，默认 `false`；设为 `true` 后会忽略 `KIRO_STREAM_RETRY_MAX_ATTEMPTS`，但不建议默认开启。
 - `KIRO_STREAM_RETRY_BACKOFF_MS`：每次重试前等待的毫秒数；无限重试时，超过数组长度后会一直复用最后一个等待时间；如果误设为空数组，会回退到 25 秒。
 
 这针对的是瞬时模型容量不足和网络抖动，不会重试鉴权失败、用量上限、prompt 过长、用户取消、参数校验失败等非瞬时错误。错误对象的 `cause` 链最多向下检查 10 层，避免异常对象循环导致卡住。

@@ -106,6 +106,14 @@ The upper-level error translator may also unify some unknown errors as:
 An unexpected error occurred, please retry.
 ```
 
+Spec task sub-agents may also display:
+
+```text
+Failed to invoke Spec Task Execution
+```
+
+This is typically not because `invoke_sub_agent` cannot find the sub-agent, but rather because the `spec-task-execution` sub-agent has encountered consecutive high-load/transient service errors internally, and after retries are exhausted, the parent tool wraps it as an invoke failure.
+
 The original behavior marks the current execution as failed immediately. High load is typically a transient service capacity issue, and network errors may be brief jitter at the TLS/socket/fetch layer. Server messages containing `please retry` / `please try again` explicitly indicate that a retry should be attempted before surfacing the failure to the user.
 
 ### 6. `[Steering] ExistingFiles` file list bloat with duplicates
@@ -255,7 +263,7 @@ This prevents empty decoration objects from triggering extension host validation
 - Network error codes: `B14`, `be10`.
 - Common network error codes or messages: `ECONNRESET`, `ECONNABORTED`, `ECONNREFUSED`, `EHOSTUNREACH`, `ENETUNREACH`, `ENOTFOUND`, `EAI_AGAIN`, `ETIMEDOUT`, `ERR_NETWORK`, `fetch failed`, `failed to fetch`, `socket disconnected`.
 - Transient server messages explicitly requesting retry: `please retry`, `please try again`, `An unexpected error occurred`, `temporarily unavailable`, `unexpectedly high load`.
-- Default maximum of 5 retries, adjustable via constants in `extension.js`.
+- Default maximum of 5 retries, adjustable via constants in `extension.js`; infinite retry is not enabled by default to avoid tasks occupying execution state indefinitely during prolonged periods of high service load.
 - Default backoff times are approximately 1.5s, 4s, 9s, 16s, 25s, with a small amount of random jitter.
 - If the model has already streamed any chunks, automatic retry is skipped to avoid duplicate tool calls, duplicate file writes, or duplicate partial output submissions.
 - If the retry limit is reached and still failing, the original error path is preserved and the error is surfaced to the user.
@@ -271,8 +279,8 @@ KIRO_STREAM_RETRY_BACKOFF_MS = [1500, 4e3, 9e3, 16e3, 25e3];
 
 Meanings:
 
-- `KIRO_STREAM_RETRY_MAX_ATTEMPTS`: Maximum retry count, default `5`; set to `0` to disable automatic retry.
-- `KIRO_STREAM_RETRY_FOREVER`: Whether to retry indefinitely, default `false`; when set to `true`, `KIRO_STREAM_RETRY_MAX_ATTEMPTS` is ignored.
+- `KIRO_STREAM_RETRY_MAX_ATTEMPTS`: Maximum retry count, default `5`; only takes effect when `KIRO_STREAM_RETRY_FOREVER = false`; set to `0` to disable automatic retry.
+- `KIRO_STREAM_RETRY_FOREVER`: Whether to retry indefinitely, default `false`; when set to `true`, `KIRO_STREAM_RETRY_MAX_ATTEMPTS` is ignored, but enabling this by default is not recommended.
 - `KIRO_STREAM_RETRY_BACKOFF_MS`: Milliseconds to wait before each retry; when retrying indefinitely, the last wait time is reused once the array length is exceeded; if mistakenly set to an empty array, it falls back to 25 seconds.
 
 This targets transient model capacity shortages and network jitter. It does not retry authentication failures, usage limits, overly long prompts, user cancellations, parameter validation failures, or other non-transient errors. The error object's `cause` chain is checked up to 10 levels deep to avoid getting stuck due to exception object cycles.
